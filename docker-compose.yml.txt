@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+trainer:
+build: .
+image: concrete-damage-segmentation:gpu
+# Use the modern Docker `--gpus` flag; docker-compose does not directly pass it in all versions.
+# When running with docker-compose, pass the `--gpus` option in the CLI: `docker compose up --build --force-recreate --remove-orphans --no-deps --scale trainer=1`
+environment:
+- PYTHONUNBUFFERED=1
+- NVIDIA_VISIBLE_DEVICES=all
+volumes:
+- ./data:/app/data:rw # mount your local dataset folder here
+- ./outputs:/app/outputs:rw
+# If you prefer to launch via docker run instead of compose, see the README below.
+command: ["--data-dir", "/app/data", "--output-dir", "/app/outputs"]
+
+
+# If you use an older docker-compose that supports `runtime: nvidia`, you could add it under `deploy` or `runtime`.

@@ -1,0 +1,37 @@
+model:
+  architecture: "UnetPlusPlus"
+  encoder: "timm-efficientnet-b5"
+  weights: "imagenet"
+  num_classes: 19
+
+training:
+  epochs: 100
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  shuffle: true
+  load_model: false
+
+optimizer:
+  name: "AdamW"
+  params:
+    lr: 1e-4
+    weight_decay: 1e-2
+
+scheduler:
+  name: ReduceLROnPlateau
+  params:
+    mode: min
+    factor: 0.5
+    patience: 10
+    threshold: 0.001
+    threshold_mode: rel
+    cooldown: 2
+    min_lr: 1e-7
+    verbose: true
+    
+amp:
+  enabled: true
+
+checkpoints:
+  folder: "./checkpoints"
