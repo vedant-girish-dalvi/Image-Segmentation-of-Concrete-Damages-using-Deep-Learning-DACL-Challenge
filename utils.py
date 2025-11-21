@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import DataLoader
 import json
-import os
+import os, random
 from pathlib import Path
 from model import SegmentationModel
 from torchvision.transforms.functional import to_pil_image
@@ -17,7 +17,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 NUM_CLASSES = 19
 CHECKPOINT_DIR = "./checkpoints"
 BEST_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "best_model.pth")
-LAST_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "last_model.pth")
+LAST_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "UnetPlusPlus_timm-efficientnet-b5_epoch20_20251019_083628.pth")
 OUTPUT_DIR = "./submission_masks"
 # Define label names (change as per your class labels)
 CLASS_LABELS = [
@@ -166,41 +166,188 @@ def get_class_mapping():
 
 
 '''Checkpointing UTILS'''
-def save_checkpoint(model, optimizer, epoch, best=False):
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # Ensure deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+import os
+import torch
+
+
+def save_checkpoint(model, optimizer, epoch, filepath, scheduler=None, scaler=None, best=False):
+    """
+    Saves model, optimizer, scheduler, and scaler states in one checkpoint file.
+    Example filename: 'checkpoints/DeepLabV3Plus_mit_b5_e055_miou0.3744_vloss0.1836.pth'
+    """
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
     checkpoint = {
         "epoch": epoch,
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
     }
+
+    if scheduler is not None:
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+    if scaler is not None:
+        checkpoint["scaler_state_dict"] = scaler.state_dict()   
+
+    torch.save(checkpoint, filepath)
+
     if best:
-        torch.save(checkpoint, BEST_MODEL_PATH)
+        print(f"Saved best model checkpoint to: {filepath}")
     else:
-        torch.save(checkpoint, LAST_MODEL_PATH)
+        print(f"Saved checkpoint to: {filepath}")
 
 
-def load_checkpoint(model, optimizer):
-    if os.path.exists(LAST_MODEL_PATH):
-        checkpoint = torch.load(LAST_MODEL_PATH)
-        model.load_state_dict(checkpoint["model_state"])
-        optimizer.load_state_dict(checkpoint["optimizer_state"])
-        print(f"Resumed training from epoch {checkpoint['epoch']+1}")
-        return checkpoint["epoch"] + 1  # Resume from next epoch
-    return 1  # Start from first epoch
+def resume_from_checkpoint(model, optimizer, scheduler=None, scaler=None, filepath=None, device="cuda"):
+    """
+    Loads model, optimizer, scheduler, and scaler states from a checkpoint.
+    Moves optimizer state tensors to the correct device (fixes CUDA/CPU mismatch).
+    Returns next epoch number for training continuation.
+    """
+    if filepath is None or not os.path.exists(filepath):
+        raise FileNotFoundError(f"Checkpoint not found: {filepath}")
 
-def load_model(checkpoint_path, device=DEVICE):
-    """Loads the model from checkpoint"""
-    model = SegmentationModel(arch="Unet", encoder="resnet34", weights=None, num_classes=NUM_CLASSES).to(device)
-    
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state"])
-        print(f"Loaded model from {checkpoint_path}")
-    else:
-        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+    print(f"Loading checkpoint from: {filepath}")
+    checkpoint = torch.load(filepath, map_location=device)
 
-    model.eval()  # Set to evaluation mode
-    return model
+    # --- Load model weights ---
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    # --- Load optimizer and move its state tensors to correct device ---
+    if "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+
+    # --- Load AMP scaler (if present) ---
+    if scaler is not None and "scaler_state_dict" in checkpoint:
+        try:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        except Exception as e:
+            print(f"Warning: Could not load scaler state. ({e})")
+
+    # --- Load scheduler (if present) ---
+    if scheduler is not None and "scheduler_state_dict" in checkpoint:
+        try:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        except Exception as e:
+            print(f"Warning: Could not load scheduler state. ({e})")
+
+    start_epoch = checkpoint.get("epoch", 0) + 1
+    print(f"Loaded checkpoint '{filepath}' (resuming from epoch {start_epoch})")
+    return start_epoch
+
+
+
+# def save_checkpoint(model, optimizer, epoch, filepath, best=False):
+#     """
+#     Saves model checkpoint.
+
+#     Args:
+#         model: torch.nn.Module
+#         optimizer: torch optimizer
+#         epoch: current epoch
+#         filepath: path to save checkpoint
+#         best: if True, mark as best model
+#     """
+#     state = {
+#         "epoch": epoch,
+#         "model_state_dict": model.state_dict(),
+#         "optimizer_state_dict": optimizer.state_dict(),
+#     }
+
+#     torch.save(state, filepath)
+#     print(f"Checkpoint saved: {filepath}")
+
+#     # Optionally, maintain a separate copy of the best model
+#     if best:
+#         best_path = os.path.join(os.path.dirname(filepath), "best_model.pth")
+#         torch.save(state, best_path)
+#         print(f"Best model updated: {best_path}")
+
+
+# def load_checkpoint(model, optimizer=None, filepath=None, device="cuda:0"):
+    # """
+    # Loads model and optimizer state from a checkpoint.
+
+    # Args:
+    #     model: torch.nn.Module
+    #     optimizer: torch optimizer (optional)
+    #     filepath: path to checkpoint file (if None, auto-loads best_model.pth)
+    #     device: device to load checkpoint to
+    # Returns:
+    #     start_epoch (int): next epoch to continue from
+    # """
+    # if filepath is None:
+    #     filepath = os.path.join("./checkpoints", "best_model.pth")
+
+    # if not os.path.exists(filepath):
+    #     raise FileNotFoundError(f"Checkpoint not found!!!: {filepath}")
+
+    # checkpoint = torch.load(filepath, map_location=device)
+    # model.load_state_dict(checkpoint["model_state_dict"])
+    # if optimizer is not None and "optimizer_state_dict" in checkpoint:
+    #     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    # start_epoch = checkpoint.get("epoch", 0) + 1
+    # print(f"Loaded checkpoint '{filepath}' (epoch {start_epoch})")
+    # return start_epoch
+
+# def save_checkpoint(model, optimizer, epoch, path, best=False):
+#     checkpoint = {
+#         "epoch": epoch,
+#         "model_state": model.state_dict(),
+#         "optimizer_state": optimizer.state_dict(),
+#         "best": best,
+#     }
+#     torch.save(checkpoint, path)
+#     if best:
+#         print(f"Saved best checkpoint at: {path}")
+
+# def load_checkpoint(model, optimizer):
+#     if os.path.exists(LAST_MODEL_PATH):
+#         checkpoint = torch.load(LAST_MODEL_PATH)
+#         model.load_state_dict(checkpoint["model_state"])
+#         optimizer.load_state_dict(checkpoint["optimizer_state"])
+#         print(f"Resumed training from epoch {checkpoint['epoch']+1}")
+#         return checkpoint["epoch"] + 1  # Resume from next epoch
+#     return 1  # Start from first epoch
+
+def load_model(checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # MUST match training setup exactly
+    model = SegmentationModel(
+        arch="deeplabv3plus",
+        encoder="mit_b5",
+        weights=None,      # or "imagenet" if you trained with pretrained weights
+        num_classes=19
+    ).to(device)
+
+    # Your checkpoint uses "model_state_dict"
+    if "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print("Loaded model weights from 'model_state_dict'")
+        return model
+
+    # If something unexpected happens
+    raise KeyError(
+        f"Could not find model weights. Found keys: {checkpoint.keys()}"
+    )
+
 
 '''Prediction UTILS'''
 def predict_and_save_masks(model, test_loader, output_dir=OUTPUT_DIR, device=DEVICE):
